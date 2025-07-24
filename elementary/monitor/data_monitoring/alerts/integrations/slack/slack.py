@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from slack_sdk.models.blocks import SectionBlock
 
-from elementary.clients.slack.client import SlackClient, SlackWebClient
+from elementary.slack_integration.transport import create_transport
+from elementary.slack_integration.transport.slack_transport import SlackTransport
 from elementary.clients.slack.schema import SlackBlocksType, SlackMessageSchema
 from elementary.clients.slack.slack_message_builder import MessageColor
 from elementary.config.config import Config
@@ -82,15 +83,15 @@ class SlackIntegration(BaseIntegration):
         super().__init__()
 
         # Enforce typing
-        self.client: SlackClient
+        self.client: SlackTransport
 
-    def _initial_client(self, *args, **kwargs) -> SlackClient:
-        slack_client = SlackClient.create_client(
-            config=self.config, tracking=self.tracking
+    def _initial_client(self, *args, **kwargs) -> SlackTransport:
+        transport = create_transport(
+            token=self.config.slack_token, webhook=self.config.slack_webhook
         )
-        if not slack_client:
-            raise Exception("Could not initial Slack client")
-        return slack_client
+        if not transport:
+            raise Exception("Could not initial Slack transport")
+        return transport
 
     def _get_alert_template(
         self,
@@ -1066,7 +1067,7 @@ class SlackIntegration(BaseIntegration):
             return bool(re.fullmatch(email_regex, potential_email))
 
         def _get_user_id(email: str) -> str:
-            user_id = self.client.get_user_id_from_email(email)
+            user_id = self.client.lookup_user_id(email)
             return f"<@{user_id}>" if user_id else email
 
         if emails is None:
@@ -1115,8 +1116,12 @@ class SlackIntegration(BaseIntegration):
         try:
             self._fix_owners_and_subscribers(alert)
             template = self._get_alert_template(alert)
-            sent_successfully = self.client.send_message(
-                channel_name=channel_name, message=template
+            sent_successfully = bool(
+                self.client.send_message(
+                    channel_name,
+                    template.blocks or [],
+                    template.attachments,
+                )
             )
         except Exception as err:
             logger.error(
@@ -1134,8 +1139,12 @@ class SlackIntegration(BaseIntegration):
                     f"Sending alert to default Slack channel: {self.config.slack_channel_name}"
                 )
                 channel_name = self.config.slack_channel_name
-                sent_successfully = self.client.send_message(
-                    channel_name=channel_name, message=template
+                sent_successfully = bool(
+                    self.client.send_message(
+                        channel_name,
+                        template.blocks or [],
+                        template.attachments,
+                    )
                 )
             except Exception as err:
                 logger.error(
@@ -1146,8 +1155,12 @@ class SlackIntegration(BaseIntegration):
         if not sent_successfully:
             try:
                 fallback_template = self._get_fallback_template(alert)
-                fallback_sent_successfully = self.client.send_message(
-                    channel_name=channel_name, message=fallback_template
+                fallback_sent_successfully = bool(
+                    self.client.send_message(
+                        channel_name,
+                        fallback_template.blocks or [],
+                        fallback_template.attachments,
+                    )
                 )
             except Exception as err:
                 logger.error(f"Unable to send alert fallback via Slack: {err}")
@@ -1160,7 +1173,12 @@ class SlackIntegration(BaseIntegration):
 
     def send_test_message(self, channel_name: str, *args, **kwargs) -> bool:
         test_message = self._get_test_message_template()
-        return self.client.send_message(channel_name=channel_name, message=test_message)
+        resp = self.client.send_message(
+            channel_name,
+            test_message.blocks or [],
+            test_message.attachments,
+        )
+        return bool(resp)
 
     def _get_integration_params(
         self,
@@ -1175,7 +1193,7 @@ class SlackIntegration(BaseIntegration):
         **kwargs,
     ) -> Dict[str, Any]:
         integration_params = dict()
-        if isinstance(self.client, SlackWebClient):
+        if self.client and self.config.slack_token:
             if self.override_config_defaults:
                 channel = self.config.slack_channel_name
                 logger.debug(f"Using override config default channel: {channel}")

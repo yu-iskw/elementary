@@ -8,7 +8,8 @@ from typing import Optional, Tuple
 from elementary.clients.azure.client import AzureClient
 from elementary.clients.gcs.client import GCSClient
 from elementary.clients.s3.client import S3Client
-from elementary.clients.slack.client import SlackClient
+from elementary.slack_integration.transport import create_transport
+from elementary.slack_integration.transport.slack_transport import SlackTransport
 from elementary.config.config import Config
 from elementary.monitor.api.invocations.invocations import InvocationsAPI
 from elementary.monitor.api.report.report import ReportAPI
@@ -47,8 +48,8 @@ class DataMonitoringReport(DataMonitoring):
         self.azure_client = AzureClient.create_client(
             self.config, tracking=self.tracking
         )
-        self.slack_client = SlackClient.create_client(
-            self.config, tracking=self.tracking
+        self.slack_transport: SlackTransport | None = create_transport(
+            token=self.config.slack_token, webhook=self.config.slack_webhook
         )
 
     def generate_report(
@@ -214,8 +215,9 @@ class DataMonitoringReport(DataMonitoring):
         ) or disable_html_attachment:
             should_send_report_over_slack = False
 
-        # If a Slack client is provided, we want to send a results summary and attachment of the report if needed.
-        if self.slack_client:
+        # If a Slack transport is provided, we want to send a results summary and
+        # attachment of the report if needed.
+        if self.slack_transport:
             # Send test results summary
             self.send_test_results_summary(
                 days_back=days_back,
@@ -231,10 +233,14 @@ class DataMonitoringReport(DataMonitoring):
         return self.success
 
     def send_report_attachment(self, local_html_path: str) -> bool:
-        if self.slack_client:
-            send_succeeded = self.slack_client.send_report(
-                self.config.slack_channel_name, local_html_path
-            )
+        if self.slack_transport:
+            try:
+                resp = self.slack_transport.send_file(
+                    self.config.slack_channel_name, local_html_path
+                )
+                send_succeeded = bool(resp)
+            except Exception:
+                send_succeeded = False
             self.execution_properties["sent_to_slack_successfully"] = send_succeeded
             if not send_succeeded:
                 self.success = False
@@ -296,10 +302,9 @@ class DataMonitoringReport(DataMonitoring):
             filter=self.selector_filter.to_selector_filter_schema(),
             dbt_invocation=invocation,
         )
-        if self.slack_client:
-            send_succeeded = self.slack_client.send_message(
-                channel_name=self.config.slack_channel_name,
-                message=SlackReportSummaryMessageBuilder().get_slack_message(
+        if self.slack_transport:
+            try:
+                message = SlackReportSummaryMessageBuilder().get_slack_message(
                     test_results=summary_test_results,
                     bucket_website_url=bucket_website_url,
                     include_description=include_description,
@@ -307,8 +312,15 @@ class DataMonitoringReport(DataMonitoring):
                     days_back=days_back,
                     env=self.config.env,
                     project_name=self.config.project_name,
-                ),
-            )
+                )
+                resp = self.slack_transport.send_message(
+                    self.config.slack_channel_name,
+                    message.blocks or [],
+                    message.attachments,
+                )
+                send_succeeded = bool(resp)
+            except Exception:
+                send_succeeded = False
         else:
             send_succeeded = False
 
